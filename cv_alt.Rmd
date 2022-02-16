@@ -1,0 +1,284 @@
+---
+title: "cv_alt"
+author: "Karol Buda"
+date: "2/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(minpack.lm)
+set.seed(123)
+```
+
+## Simulation and Data Preparation
+
+Let's assume we have two long-lived substates (whether its dimer vs monomer, conformers, etc)
+
+We can simulate two enzymes with different mean activities, sample them unequally to result in different height peaks, and give them some intrinsic CV
+
+```{r}
+state_1 = 50
+state_2 = 100
+
+activity = c()
+
+activity = c(activity, rnorm(1000, state_1, sd = 0.2*state_1))
+activity = c(activity, rnorm(3000, state_2, sd = 0.2*state_2))
+
+head(activity, 5)
+```
+Now we can view this as a density histogram
+
+```{r}
+p1 = as_tibble(activity) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 75, alpha = 0.8, color = "black", size = 0.1) +
+  labs(x = "Enzyme Activity",
+       y = "Density") +
+  theme_classic() +
+    theme(axis.line = element_line(size = 0.2, color = "black"), axis.ticks = element_line(size = 0.2, color = "black"), text = element_text(size = 9), axis.text = element_text(size = 8, color = "black"))
+
+p1
+```
+
+## Initial Fitting
+
+First its easier to create a data frame (tibble) where we use the histogram bins and densities from the previous plot
+```{r}
+activity_density = tibble(activity = ggplot_build(p1)$data[[1]]$x, density = ggplot_build(p1)$data[[1]]$y)
+```
+
+To make sure we "fit" both the single and double Gaussian, we will use a non-linear least squares fit for both. Starting with the definition of the single Gaussian function.
+
+```{r}
+single_gauss = function(x, C, mean, sigma) {
+  return(C * exp(-(x-mean)**2/(2 * sigma**2)))
+}
+```
+
+Then we fit this using non-linear least squares, extract the parameters, and create a fit using the double gaussian prediction
+
+```{r}
+fit_single <- nlsLM(density ~ single_gauss(activity, C, mean, sigma), data = activity_density, start=list(C=0.1, mean=150, sigma=0.2*150), lower = c(0, 0, 0))
+
+single_gauss_params = as.list(summary(fit_single)$param[,1])
+
+single_gauss_preds = do.call(single_gauss, c(list(x = activity_density$activity), single_gauss_params))
+
+activity_density$single_gauss_preds = single_gauss_preds
+
+p1 + geom_line(data = activity_density, aes(x = activity, y = single_gauss_preds))
+```
+
+What about a double Gaussian? 
+
+We define our double gauss function with C1 + C2 representing heights (i.e. densities), mean1 + mean 2 are the two means, and sigma1 + sigma2 are the standard deviations
+
+```{r}
+double_gauss = function(x, C1, mean1, sigma1, C2, mean2, sigma2) {
+  return (C1 * exp(-(x-mean1)**2/(2 * sigma1**2)) + C2 * exp(-(x-mean2)**2/(2 * sigma2**2)))
+}
+```
+
+Then we fit this using non-linear least squares, extract the parameters, and create a fit using the double Gaussian prediction
+
+```{r}
+fit_double <- nlsLM(density ~ double_gauss(activity, C1, mean1, sigma1, C2, mean2, sigma2), data = activity_density, start=list(C1=0.1, mean1=50, sigma1=0.2*50, C2=0.1, mean2=100, sigma2=0.2*100))
+
+double_gauss_params = as.list(summary(fit_double)$param[,1])
+
+double_gauss_preds = do.call(double_gauss, c(list(x = activity_density$activity), double_gauss_params))
+
+activity_density$double_gauss_preds = double_gauss_preds
+
+p1 + geom_line(data = activity_density, aes(x = activity, y = double_gauss_preds))
+```
+
+Much better fit, comparing the single gauss mean of `r round(single_gauss_params$mean, 2)` vs the two gauss means `r round(double_gauss_params$mean1, 2)` and `r round(double_gauss_params$mean2, 2)`
+
+The standard deviations of the two also differ, `r round(single_gauss_params$sigma, 2)` for single versus `r round(double_gauss_params$sigma1, 2)` and `r round(double_gauss_params$sigma2, 2)`
+
+### Choosing single vs double Gaussian
+
+Determining whether single or double gaussian is better should be done systematically through something like an AIC
+
+```{r}
+AIC(fit_single, fit_double)
+```
+
+Lower AIC is better, and here it's no question that the double gaussian is better.
+
+But what about "fuzzier" conditions?
+
+## More Homogenous Data
+
+Simulate same thing but with closer starting states, and more representation of the lower activity state, with the same 20% CV
+
+```{r}
+state_1 = 70
+state_2 = 100
+
+activity_new = c()
+
+activity_new = c(activity_new, rnorm(2000, state_1, sd = 0.2*state_1))
+activity_new = c(activity_new, rnorm(3000, state_2, sd = 0.2*state_2))
+
+p2 = as_tibble(activity_new) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 75, alpha = 0.8, color = "black", size = 0.1) +
+  labs(x = expression("Enzyme Activity"),
+       y = "Density") +
+  theme_classic() +
+    theme(axis.line = element_line(size = 0.2, color = "black"), axis.ticks = element_line(size = 0.2, color = "black"), text = element_text(size = 9), axis.text = element_text(size = 8, color = "black"))
+
+p2
+```
+
+Make tibble and single fit using this data
+
+```{r}
+activity_density_new = tibble(activity = ggplot_build(p2)$data[[1]]$x, density = ggplot_build(p2)$data[[1]]$y)
+
+fit_single_new <- nlsLM(density ~ single_gauss(activity, C, mean, sigma), data = activity_density_new, start=list(C=0.01, mean=100, sigma=0.2*100))
+
+single_gauss_params_new = as.list(summary(fit_single_new)$param[,1])
+
+single_gauss_preds_new = do.call(single_gauss, c(list(x = activity_density_new$activity), single_gauss_params_new))
+
+activity_density_new$single_gauss_preds_new = single_gauss_preds_new
+
+p2 + geom_line(data = activity_density_new, aes(x = activity, y = single_gauss_preds_new))
+```
+
+Then again with the double fit
+
+```{r}
+fit_double_new <- nlsLM(density ~ double_gauss(activity, C1, mean1, sigma1, C2, mean2, sigma2), data = activity_density_new, start=list(C1=0.01, mean1=70, sigma1=0.2*70, C2=0.01, mean2=100, sigma2=0.2*100))
+
+double_gauss_params_new = as.list(summary(fit_double_new)$param[,1])
+
+double_gauss_preds_new = do.call(double_gauss, c(list(x = activity_density_new$activity), double_gauss_params_new))
+
+activity_density$double_gauss_preds_new = double_gauss_preds_new
+
+p2 + geom_line(data = activity_density_new, aes(x = activity, y = double_gauss_preds_new))
+```
+
+Fits are not as good... Let's look at the AIC
+
+```{r}
+AIC(fit_single_new, fit_double_new)
+```
+
+Double is still better, but seems like it might always be better. What if we have noisy single state data?
+
+## Single state data
+
+Simulate same thing but with one starting states with the same 20% CV
+
+```{r}
+state_1 = 150
+
+activity_newer = c()
+activity_newer = c(activity_newer, rnorm(3000, state_1, sd = 0.3*state_1))
+
+# Had to add this as large SD lead to negative activity value. Also 0 is not tolerated for log10 scale
+activity_newer[which(activity_newer < 0)] = 0
+
+p3 = as_tibble(activity_newer) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(aes(y = ..density..), bins = 75, alpha = 0.8, color = "black", size = 0.1) +
+  labs(x = "Enzyme Activity",
+       y = "Density") +
+  theme_classic() +
+    theme(axis.line = element_line(size = 0.2, color = "black"), axis.ticks = element_line(size = 0.2, color = "black"), text = element_text(size = 9), axis.text = element_text(size = 8, color = "black"))
+
+p3
+```
+
+Make tibble and single fit using this data
+
+```{r}
+activity_density_newer = tibble(activity = ggplot_build(p3)$data[[1]]$x, density = ggplot_build(p3)$data[[1]]$y)
+
+fit_single_newer <- nlsLM(density ~ single_gauss(activity, C, mean, sigma), data = activity_density_newer, start=list(C=0.1, mean=150, sigma=0.2*150))
+
+single_gauss_params_newer = as.list(summary(fit_single_newer)$param[,1])
+
+single_gauss_preds_newer = do.call(single_gauss, c(list(x = activity_density_newer$activity), single_gauss_params_newer))
+
+activity_density_newer$single_gauss_preds_newer = single_gauss_preds_newer
+
+p3 + geom_line(data = activity_density_newer, aes(x = activity, y = single_gauss_preds_newer))
+```
+
+Then again with the double fit
+
+```{r}
+fit_double_newer <- nlsLM(density ~ double_gauss(activity, C1, mean1, sigma1, C2, mean2, sigma2), data = activity_density_newer, start=list(C1=0.075, mean1=145, sigma1=0.3*145, C2=0.075, mean2=155, sigma2=0.3*155))
+
+double_gauss_params_newer = as.list(summary(fit_double_newer)$param[,1])
+
+double_gauss_preds_newer = do.call(double_gauss, c(list(x = activity_density_newer$activity), double_gauss_params_newer))
+
+activity_density$double_gauss_preds_newer = double_gauss_preds_newer
+
+p3 + geom_line(data = activity_density_newer, aes(x = activity, y = double_gauss_preds_newer))
+```
+
+Fits are not as good... Let's look at the AIC
+
+```{r}
+AIC(fit_single_newer, fit_double_newer)
+```
+
+The two are generally quite similar, but the newer seems to be fitting better.
+
+A few things to note about this analysis:
+
+1. Assumptions on the simulated data may not be similar to the actual enzyme ones
+2. Had to manually tweak starting parameters of Gaussian which is impractical for automated analysis
+    * Come up with ways to extract estimates of height, mean, and sd
+    
+## Applying Shannon Index
+
+We can use Dan's suggestion of using some form of diversity index. In this case, the Shannon Index taken from biodiversity can be useful.
+
+This works by looking at relative abundance (in our case could be density) of species and computes an index. It works like this:
+
+```{r}
+shannon = function(p) {
+  return(-1*sum(p*log(p), na.rm = T))
+}
+```
+
+Where p is the density across the length of p which is determined by bin size
+
+Let's try to apply it to the 3 graphs plotted above. I normalize the enzyme activity to the total, as this represents relative frequencies. We need something that adds up to 1 like a probability.
+
+```{r}
+shannon_indicies = c(shannon(activity_density$density / sum(activity_density$density)),
+  shannon(activity_density_new$density / sum(activity_density_new$density)),
+  shannon(activity_density_newer$density / sum(activity_density_newer$density)))
+
+shannon_indicies
+```
+
+Diversity indicates are pretty similar... Let's see if they graphically look alike
+
+```{r}
+activity_density %>%
+  ggplot(aes(x = activity, y = density)) +
+  geom_line() +
+  geom_line(data = activity_density_new, aes(x = activity, y = density), color = "red") +
+  geom_line(data = activity_density_newer, aes(x = activity, y = density), color = "blue") +
+  labs(x = expression("Enzyme Activity"),
+       y = "Density") +
+  theme_classic() +
+    theme(axis.line = element_line(size = 0.2, color = "black"), axis.ticks = element_line(size = 0.2, color = "black"), text = element_text(size = 9), axis.text = element_text(size = 8, color = "black"))
+```
+
+The two clear peaks appear to have a higher Shannon diversity index of `r shannon_indicies[1]`, while the close peaks are `r shannon_indicies[2]` and finally the broad peak being `r shannon_indicies[3]`
